@@ -6,19 +6,23 @@ How it works:
 
 Redis pubsub channel is created for every group and interested users in group subscribe to that channel.
 
-To connect: ws://localhost:8080/chat?userId="user1"
+To connect: ``` ws://localhost:8080/chat?userId="user1" ```
 
 Below commands sent over socket after successful connection
 
 To join channel:
+```
 {
 "cmd":"I-JC",
 "chName":"ch1"
 }
+```
 
 To send message to channel:
+```
 {
 "cmd":"I-SM",
 "chName":"ch1",
 "msg":"i dont know"
 }
+```
