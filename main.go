@@ -16,8 +16,6 @@ type request struct {
 	Msg         string `json:"msg"`
 }
 
-var mutex sync.Mutex
-
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
 	WriteBufferSize: 1024,
@@ -50,6 +48,8 @@ func handleWebSocket(c *gin.Context) {
 		return
 	}
 
+	log.Println("User " + userId + " connected successfully")
+
 	// maintaining list of all subscribed pubsub objects, so once connection is disconnected, we can close all pubsub object
 	var subscribedChannels = make(map[string]*redis.PubSub)
 
@@ -61,6 +61,8 @@ func handleWebSocket(c *gin.Context) {
 		log.Println("closing connection")
 		conn.Close()
 	}()
+
+	var mutex sync.Mutex
 
 	for {
 		// Read message from the client
@@ -80,7 +82,7 @@ func handleWebSocket(c *gin.Context) {
 			// if not already subscribed, then only subscribe
 			if _, ok := subscribedChannels[data.ChannelName]; !ok {
 				pubsub := redisClient.Subscribe(c, data.ChannelName)
-				go listenToChannel(conn, pubsub)
+				go listenToChannel(conn, pubsub, &mutex)
 				subscribedChannels[data.ChannelName] = pubsub
 			}
 		case "I-SM": // Send Message
@@ -92,8 +94,8 @@ func handleWebSocket(c *gin.Context) {
 	}
 }
 
-// listen for redis messages in a goroutine
-func listenToChannel(conn *websocket.Conn, ps *redis.PubSub) {
+// listen for pubsub channel messages in a goroutine
+func listenToChannel(conn *websocket.Conn, ps *redis.PubSub, mutex *sync.Mutex) {
 	for {
 		msg, ok := <-ps.Channel()
 		if !ok {
