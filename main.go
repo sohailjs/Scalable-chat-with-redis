@@ -1,12 +1,22 @@
 package main
 
 import (
+	"encoding/json"
 	"github.com/gin-gonic/gin"
 	"github.com/go-redis/redis/v8"
 	"github.com/gorilla/websocket"
 	"log"
 	"net/http"
+	"sync"
 )
+
+type request struct {
+	Cmd         string `json:"cmd"`
+	ChannelName string `json:"chName"`
+	Msg         string `json:"msg"`
+}
+
+var mutex sync.Mutex
 
 var upgrader = websocket.Upgrader{
 	ReadBufferSize:  1024,
@@ -18,8 +28,6 @@ var upgrader = websocket.Upgrader{
 
 var redisClient *redis.Client
 
-const ChatChannel = "chat"
-
 func init() {
 	redisClient = redis.NewClient(&redis.Options{
 		Addr:     "localhost:6379", // Update with your Redis server address
@@ -29,49 +37,78 @@ func init() {
 }
 
 func handleWebSocket(c *gin.Context) {
+	userId := c.Query("userId")
+	if userId == "" {
+		log.Println("userId is empty")
+		c.JSON(http.StatusBadRequest, gin.H{"err": "userId not provided"})
+		return
+	}
+
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
 		log.Println(err)
 		return
 	}
-	defer conn.Close()
 
-	pubsub := redisClient.Subscribe(c, ChatChannel)
-	defer pubsub.Close()
+	// maintaining list of all subscribed pubsub objects, so once connection is disconnected, we can close all pubsub object
+	var subscribedChannels = make(map[string]*redis.PubSub)
 
-	//listen for redis messages in a goroutine
-	msgChannel := pubsub.Channel()
-	go func() {
-		for {
-			msg, ok := <-msgChannel
-			if !ok {
-				return
-			}
-			conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload))
+	defer func() {
+		log.Printf("closing total pubsubs: %d\n", len(subscribedChannels))
+		for _, ps := range subscribedChannels {
+			ps.Close()
 		}
+		log.Println("closing connection")
+		conn.Close()
 	}()
 
 	for {
 		// Read message from the client
-		msgType, msg, err := conn.ReadMessage()
+		_, msg, err := conn.ReadMessage()
 		if err != nil {
 			log.Println(err)
 			return
 		}
-		if msgType == websocket.TextMessage {
-			err := redisClient.Publish(c, ChatChannel, msg).Err()
+
+		var data request
+		err = json.Unmarshal(msg, &data)
+		if err != nil {
+			continue
+		}
+		switch data.Cmd {
+		case "I-JC": // Join Channel
+			// if not already subscribed, then only subscribe
+			if _, ok := subscribedChannels[data.ChannelName]; !ok {
+				pubsub := redisClient.Subscribe(c, data.ChannelName)
+				go listenToChannel(conn, pubsub)
+				subscribedChannels[data.ChannelName] = pubsub
+			}
+		case "I-SM": // Send Message
+			err = redisClient.Publish(c, data.ChannelName, userId+": "+data.Msg).Err()
 			if err != nil {
 				log.Println(err)
-				return
 			}
 		}
+	}
+}
+
+// listen for redis messages in a goroutine
+func listenToChannel(conn *websocket.Conn, ps *redis.PubSub) {
+	for {
+		msg, ok := <-ps.Channel()
+		if !ok {
+			return
+		}
+		mutex.Lock()
+		conn.WriteMessage(websocket.TextMessage, []byte(msg.Payload))
+		mutex.Unlock()
 	}
 }
 
 func main() {
 	r := gin.Default()
 
-	r.GET("/ws", handleWebSocket)
+	r.GET("/chat", handleWebSocket)
 
 	err := r.Run(":8080")
 	if err != nil {
